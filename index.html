@@ -91,20 +91,31 @@
   }
   #overlay button:active { transform:translateY(4px); box-shadow:0 2px 0 var(--ink); }
 
-  /* 화면 조작 버튼 (터치 기기에서만): 쿠키런처럼 화면 양쪽 끝에 큼직하게. 왼쪽 슬라이드, 오른쪽 점프 */
+  /* 폰(터치): 쿠키런처럼 게임 화면이 화면 전체를 쓰고, 점수·버튼은 그 화면 안에 그린다 */
+  #probe { position:absolute; width:0; height:0; visibility:hidden; padding-left:env(safe-area-inset-left, 0px); padding-right:env(safe-area-inset-right, 0px); }
+  body.touch #stage { padding:0; }
+  body.touch #col { position:relative; }
+  body.touch #hud { position:absolute; top:calc(8px + env(safe-area-inset-top, 0px)); right:calc(10px + env(safe-area-inset-right, 0px)); width:auto; padding:0; z-index:4; }
+  body.touch #hud .item { display:none; }
+  body.touch #hud .icons { margin:0; }
+  body.touch #hud button { background:rgba(255,255,255,.85); }
+  body.touch #game { border:none; border-radius:0; box-shadow:none; }
+  body.touch #overlay { border-radius:0; }
+  /* 슬라이드(왼쪽)·점프(오른쪽) 버튼: 화면 아래 흙 띠 위에 반투명하게 */
   #pad { display:none; position:absolute; inset:0; pointer-events:none; z-index:3; }
   body.touch #pad { display:block; }
   #pad button {
-    position:absolute; bottom:calc(10px + env(safe-area-inset-bottom)); width:var(--side, 120px); height:min(64%, 230px);
-    pointer-events:auto; border:3px solid var(--ink); border-radius:28px; box-shadow:0 6px 0 var(--ink);
-    font-size:22px; font-family:inherit; color:var(--ink); touch-action:none;
-    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; line-height:1.15;
+    position:absolute; bottom:calc(var(--padB, 10px) + env(safe-area-inset-bottom, 0px)); width:var(--btnW, 150px); height:var(--btnH, 84px);
+    pointer-events:auto; border:3px solid rgba(43,29,82,.75); border-radius:26px; box-shadow:0 5px 0 rgba(43,29,82,.6);
+    font-size:20px; font-family:inherit; color:var(--ink); touch-action:none;
+    display:flex; flex-direction:row; align-items:center; justify-content:center; gap:8px; line-height:1;
+    -webkit-backdrop-filter:blur(2px); backdrop-filter:blur(2px);
   }
-  #pad button .ic { font-size:34px; line-height:1; }
-  #pad button small { font-size:12px; color:var(--muted); }
-  #pad #btnSlide { left:calc(8px + env(safe-area-inset-left)); background:#c9e7ff; }
-  #pad #btnJump { right:calc(8px + env(safe-area-inset-right)); background:var(--yellow); }
-  #pad button.on { transform:translateY(5px); box-shadow:0 1px 0 var(--ink); filter:brightness(.95); }
+  #pad button .ic { font-size:30px; line-height:1; }
+  #pad button small { display:none; }
+  #pad #btnSlide { left:calc(14px + env(safe-area-inset-left, 0px)); background:rgba(110,185,255,.72); }
+  #pad #btnJump { right:calc(14px + env(safe-area-inset-right, 0px)); background:rgba(255,210,63,.72); }
+  #pad button.on { transform:translateY(4px); box-shadow:0 1px 0 rgba(43,29,82,.6); filter:brightness(.92); }
 
   /* 작은 게임 화면(폰): 점수판과 안내·결과 창을 컴팩트하게. body.compact 는 JS 가 실제 게임 화면 크기로 정한다
      (기본 규칙보다 뒤에 있어야 덮어쓴다) */
@@ -127,6 +138,7 @@
 </head>
 <body>
 <div id="stage">
+  <div id="probe"></div>
   <div id="col">
     <div id="hud">
       <div class="item score"><span class="label">SCORE</span><span class="value" id="score">0</span></div>

@@ -1,7 +1,7 @@
 'use strict';
 
 // ---------- Board ----------
-const W = 720, H = 420;
+const W = 720, H = 450;              // 기본 화면(px). 폰 전체화면에서는 가로가 더 넓어질 수 있다 (world.viewW)
 const GROUND = 330;                 // 달리는 바닥 높이
 const CX = 150;                     // 쿠키가 서 있는 화면 x (세상이 왼쪽으로 흐른다)
 const PX_PER_M = 50;
@@ -75,7 +75,7 @@ function pickPattern(w, lv, m) {
 }
 
 function spawnPattern(w) {
-  const x0 = W + 60;
+  const x0 = (w.viewW || W) + 60;      // 화면 오른쪽 바깥에서 등장
   const m = w.dist / PX_PER_M, lv = Math.min(1, m / 1200);
   let pat = null, built;
   // 회복 물약, 부스터, 자석은 일정 거리마다 따로 끼워 넣는다
@@ -102,7 +102,7 @@ function spawnPattern(w) {
 // ---------- World ----------
 function newWorld(seed = 1) {
   return {
-    seed, t: 0, dist: 0, baseSpeed: SPEED0, speed: SPEED0, state: 'play', hp: HP_MAX,
+    seed, viewW: W, t: 0, dist: 0, baseSpeed: SPEED0, speed: SPEED0, state: 'play', hp: HP_MAX,
     ck: { y: GROUND, vy: 0, onGround: true, jumps: 0, sliding: false, inv: 0, anim: 0, coyote: 0, buf: 0, cut: false, jumpHeld: false },
     obs: [], items: [], nextId: 1, spawnIn: 260,
     jellyScore: 0, jellies: 0, bonus: 0,
@@ -247,6 +247,7 @@ if (typeof document === 'undefined') {
   };
 } else {
 // ---------- Canvas ----------
+let VW = W;                         // 지금 화면의 가로 논리 크기
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 const $ = (id) => document.getElementById(id);
@@ -268,24 +269,43 @@ function layout() {
   }
   const LW = rot ? innerHeight : innerWidth, LH = rot ? innerWidth : innerHeight;
   document.body.classList.toggle('compact', LH < 520 || LW < 430);
-  return { LW, LH, touch };
+  return { LW, LH, touch, rot };
 }
 
+let SAFE_L = 0, SAFE_R = 0;         // 노치 등으로 가려지는 가장자리 (논리 px)
 function fit() {
-  const { LW, LH, touch } = layout();
-  const side = touch ? Math.round(Math.max(92, Math.min(140, LW * 0.14))) : 0;
-  $('stage').style.setProperty('--side', side + 'px');
-  const hudH = document.body.classList.contains('compact') ? 46 : 58;
-  const availW = LW - 16 - (touch ? 2 * (side + 12) : 0), availH = LH - 16 - hudH;
-  const scale = Math.min(availW / W, availH / H);
-  const cssW = Math.max(240, Math.floor(W * scale)), cssH = Math.floor(H * scale);
+  const { LW, LH, touch, rot } = layout();
+  const st = $('stage');
+  let cssW, cssH, scale;
+  if (touch) {
+    // 쿠키런처럼 화면 전체를 쓴다: 높이에 맞추고, 가로가 더 길면 더 넓게 보여 준다 (너무 넓으면 가운데 정렬)
+    VW = Math.max(W, Math.min(1100, Math.round(H * LW / LH)));
+    scale = Math.min(LW / VW, LH / H);
+    cssW = Math.floor(VW * scale); cssH = Math.floor(H * scale);
+    const dirt = (H - GROUND) * scale;                                   // 바닥 흙 띠 높이(px): 버튼은 그 안에 들어간다
+    const btnH = Math.round(Math.max(58, Math.min(100, dirt - 16)));
+    st.style.setProperty('--btnH', btnH + 'px');
+    st.style.setProperty('--btnW', Math.round(Math.max(110, Math.min(190, LW * 0.2))) + 'px');
+    st.style.setProperty('--padB', Math.round(Math.max(6, (dirt - btnH) / 2)) + 'px');
+    // 노치(가로로 든 폰 양옆)에 가려지지 않게 (눕혀서 채우는 세로 상태에서는 해당 없음)
+    const probe = $('probe'), cs = getComputedStyle(probe);
+    SAFE_L = rot ? 0 : (parseFloat(cs.paddingLeft) || 0) / scale;
+    SAFE_R = rot ? 0 : (parseFloat(cs.paddingRight) || 0) / scale;
+  } else {
+    VW = W; SAFE_L = SAFE_R = 0;
+    const hudH = document.body.classList.contains('compact') ? 46 : 58;
+    scale = Math.min((LW - 16) / W, (LH - 16 - hudH) / H);
+    cssW = Math.max(240, Math.floor(W * scale)); cssH = Math.floor(H * scale);
+  }
+  if (world) world.viewW = VW;
   const dpr = window.devicePixelRatio || 1;
   canvas.style.width = cssW + 'px';
   canvas.style.height = cssH + 'px';
   canvas.width = Math.round(cssW * dpr);
   canvas.height = Math.round(cssH * dpr);
-  ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+  ctx.setTransform(canvas.width / VW, 0, 0, canvas.height / H, 0, 0);
   $('col').style.width = cssW + 'px';
+  $('col').style.height = touch ? cssH + 'px' : '';
 }
 addEventListener('resize', fit);
 addEventListener('orientationchange', () => setTimeout(fit, 120));
@@ -349,8 +369,26 @@ function updateHud() {
   $('best').textContent = best.toLocaleString();
 }
 
+// 폰에서는 게임을 시작하는 순간 전체화면으로 (사용자가 누른 순간에만 브라우저가 허락한다).
+// 가로 고정도 시도한다(안드로이드). 전체화면이 안 되는 아이폰은 로비의 '크게 보기'로 위 막대를 숨긴다.
+function enterFull() {
+  if (!document.body.classList.contains('touch')) return;
+  const el = document.documentElement;
+  const req = el.requestFullscreen || el.webkitRequestFullscreen;
+  const immersive = () => { try { if (window.parent !== window) window.parent.document.getElementById('player').classList.add('immersive'); } catch (_) {} };
+  if (!req) { immersive(); return; }
+  if (document.fullscreenElement || document.webkitFullscreenElement) return;
+  try {
+    Promise.resolve(req.call(el)).then(() => {
+      try { const p = screen.orientation && screen.orientation.lock && screen.orientation.lock('landscape'); if (p && p.catch) p.catch(() => {}); } catch (_) {}
+    }).catch(immersive);
+  } catch (_) { immersive(); }
+}
+
 function startGame() {
+  enterFull();
   world = newWorld((Math.random() * 1e9) | 0);
+  world.viewW = VW;
   inp = { jump: false, jumpHeld: false, slide: false };
   jumpKeys.clear(); slideKeys.clear(); pointers.clear();
   particles = []; texts = []; shake = 0; lastMeters = 0;
@@ -375,11 +413,11 @@ function handleEvents(evs) {
     else if (e.type === 'djump') { sfx.djump(); burst(CX, ck.y, '#fff8c4', 8, 70, 10); }
     else if (e.type === 'land') { sfx.land(); burst(CX, GROUND, '#fff', 3, 50, 10); }
     else if (e.type === 'jelly') { sfx.jelly(); burst(e.x, e.y, JELLY_COL[e.c], 4, 70, 30); }
-    else if (e.type === 'hit') { sfx.hit(); try { navigator.vibrate && navigator.vibrate(40); } catch (_) {} shake = 0.3; hpFlash = 0.5; burst(CX, ck.y - 26, '#ff5f7a', 12, 150); floatText('-18', CX, ck.y - 60, '#ff5f7a'); }
+    else if (e.type === 'hit') { sfx.hit(); try { if (navigator.vibrate && (!navigator.userActivation || navigator.userActivation.hasBeenActive)) navigator.vibrate(40); } catch (_) {} shake = 0.3; hpFlash = 0.5; burst(CX, ck.y - 26, '#ff5f7a', 12, 150); floatText('-18', CX, ck.y - 60, '#ff5f7a'); }
     else if (e.type === 'fall') { sfx.fall(); shake = 0.35; hpFlash = 0.5; floatText('-25', CX, GROUND - 160, '#ff5f7a'); }
     else if (e.type === 'potion') { sfx.potion(); burst(e.x, e.y, '#ff7ab6', 12, 110); floatText('+30', CX, ck.y - 60, '#7ee39a'); }
-    else if (e.type === 'boost') { sfx.boost(); burst(CX, ck.y - 26, '#ffd23f', 18, 200); floatText('부스터!', W / 2, 150, '#ffd23f'); }
-    else if (e.type === 'magnet') { sfx.magnet(); floatText('자석!', W / 2, 150, '#5ab8ff'); }
+    else if (e.type === 'boost') { sfx.boost(); burst(CX, ck.y - 26, '#ffd23f', 18, 200); floatText('부스터!', VW / 2, 150, '#ffd23f'); }
+    else if (e.type === 'magnet') { sfx.magnet(); floatText('자석!', VW / 2, 150, '#5ab8ff'); }
     else if (e.type === 'smash') { sfx.smash(); burst(e.x + (e.w || 40) / 2, GROUND - 30, '#ffb3d9', 14, 200); shake = 0.15; }
     else if (e.type === 'dead') { sfx.dead(); onDead(); }
   }
@@ -457,30 +495,30 @@ function drawBackground(w, bi) {
   const [s0, s1] = mix(bi, 'sky');
   const g = ctx.createLinearGradient(0, 0, 0, GROUND);
   g.addColorStop(0, s0); g.addColorStop(1, s1);
-  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, VW, H);
   const d = w ? w.dist : uiT * 200;
   if (bi.i === 2 || (bi.i === 1 && bi.k > 0)) {
     ctx.fillStyle = `rgba(255,255,255,${bi.i === 2 ? 0.9 - bi.k * 0.9 : bi.k * 0.9})`;
-    for (let i = 0; i < 26; i++) { const x = ((i * 137 - d * 0.03) % W + W) % W, y = (i * 61) % 200 + 8; ctx.fillRect(x, y, 2 + (i % 3), 2 + (i % 3)); }
+    for (let i = 0; i < 26; i++) { const x = ((i * 137 - d * 0.03) % VW + VW) % VW, y = (i * 61) % 200 + 8; ctx.fillRect(x, y, 2 + (i % 3), 2 + (i % 3)); }
   }
   // 구름
   ctx.fillStyle = 'rgba(255,255,255,.75)';
   for (let i = 0; i < 5; i++) {
-    const x = ((i * 190 - d * 0.06) % (W + 200) + W + 200) % (W + 200) - 100, y = 40 + (i * 47) % 90;
+    const x = ((i * 190 - d * 0.06) % (VW + 200) + VW + 200) % (VW + 200) - 100, y = 40 + (i * 47) % 90;
     ctx.beginPath(); ctx.arc(x, y, 22, 0, 7); ctx.arc(x + 24, y + 4, 18, 0, 7); ctx.arc(x - 22, y + 6, 15, 0, 7); ctx.fill();
   }
   // 먼 언덕
   ctx.fillStyle = mix(bi, 'far');
   ctx.beginPath(); ctx.moveTo(0, GROUND);
-  for (let x = 0; x <= W; x += 20) ctx.lineTo(x, GROUND - 70 - Math.sin((x + d * 0.1) / 90) * 26 - Math.sin((x + d * 0.1) / 37) * 8);
-  ctx.lineTo(W, GROUND); ctx.fill();
+  for (let x = 0; x <= VW; x += 20) ctx.lineTo(x, GROUND - 70 - Math.sin((x + d * 0.1) / 90) * 26 - Math.sin((x + d * 0.1) / 37) * 8);
+  ctx.lineTo(VW, GROUND); ctx.fill();
   ctx.fillStyle = mix(bi, 'hill');
   ctx.beginPath(); ctx.moveTo(0, GROUND);
-  for (let x = 0; x <= W; x += 20) ctx.lineTo(x, GROUND - 34 - Math.sin((x + d * 0.25) / 60) * 16);
-  ctx.lineTo(W, GROUND); ctx.fill();
+  for (let x = 0; x <= VW; x += 20) ctx.lineTo(x, GROUND - 34 - Math.sin((x + d * 0.25) / 60) * 16);
+  ctx.lineTo(VW, GROUND); ctx.fill();
   // 중간 장식: 막대사탕 나무 / 컵케이크 / 달 사탕
   const step = 210;
-  for (let i = -1; i < W / step + 2; i++) {
+  for (let i = -1; i < VW / step + 2; i++) {
     const idx = Math.floor((d * 0.45) / step) + i;
     const x = idx * step - d * 0.45 + 60 + ((idx * 53) % 70);
     const kind = ((idx % 3) + 3) % 3;
@@ -506,7 +544,7 @@ function drawGround(w, bi) {
   const pits = w ? w.obs.filter((o) => o.t === 'pit' && !o.covered).sort((a, b) => a.x - b.x) : [];
   const segs = []; let x = 0;
   for (const p of pits) { if (p.x > x) segs.push([x, p.x]); x = Math.max(x, p.x + p.w); }
-  segs.push([x, W]);
+  segs.push([x, VW]);
   const d = w ? w.dist : uiT * 200;
   for (const [a, b] of segs) {
     if (b <= a) continue;
@@ -514,7 +552,7 @@ function drawGround(w, bi) {
     ctx.fillStyle = mix(bi, 'groundDark'); ctx.fillRect(a, GROUND + 40, b - a, H - GROUND - 40);
     // 비스킷 무늬
     ctx.fillStyle = 'rgba(0,0,0,.12)';
-    for (let gx = -((d * 1) % 60); gx < W; gx += 60) { if (gx + 6 > a && gx < b) { ctx.beginPath(); ctx.arc(gx + 30, GROUND + 26, 3, 0, 7); ctx.arc(gx + 12, GROUND + 60, 3, 0, 7); ctx.fill(); } }
+    for (let gx = -((d * 1) % 60); gx < VW; gx += 60) { if (gx + 6 > a && gx < b) { ctx.beginPath(); ctx.arc(gx + 30, GROUND + 26, 3, 0, 7); ctx.arc(gx + 12, GROUND + 60, 3, 0, 7); ctx.fill(); } }
     ctx.strokeStyle = INK; ctx.lineWidth = 4;
     ctx.beginPath(); ctx.moveTo(a, GROUND + 2); ctx.lineTo(b, GROUND + 2); ctx.stroke();
     // 프로스팅
@@ -523,7 +561,7 @@ function drawGround(w, bi) {
     for (let fx = a; fx <= b; fx += 6) ctx.lineTo(fx, GROUND + 8 + Math.sin((fx + d) / 14) * 3 + ((Math.floor((fx + d) / 40) % 3) === 0 ? 5 : 0));
     ctx.lineTo(b, GROUND); ctx.closePath(); ctx.fill();
     ctx.fillStyle = mix(bi, 'frost2');
-    for (let fx = -((d) % 44); fx < W; fx += 44) if (fx > a && fx < b) ctx.fillRect(fx, GROUND + 3, 6, 4);
+    for (let fx = -((d) % 44); fx < VW; fx += 44) if (fx > a && fx < b) ctx.fillRect(fx, GROUND + 3, 6, 4);
     ctx.strokeRect(a - 2, GROUND, b - a + 4, H - GROUND + 4);
   }
   // 구덩이 안: 우유 바다
@@ -659,8 +697,9 @@ function drawCookie(w, t) {
 }
 
 function drawHud(w) {
+  const full = document.body.classList.contains('touch');
   // 체력 막대
-  const x = 16, y = 14, bw = 210, bh = 16, k = w.hp / HP_MAX;
+  const x = 16 + SAFE_L, y = 14, bw = 210, bh = 16, k = w.hp / HP_MAX;
   ctx.fillStyle = '#ff5f7a'; ctx.strokeStyle = INK; ctx.lineWidth = 3;
   ctx.beginPath(); ctx.arc(x + 4, y + bh / 2, 13, 0, 7); ctx.fill(); ctx.stroke();
   ctx.fillStyle = '#fff'; ctx.font = "bold 14px 'Jua', sans-serif"; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('♥', x + 4, y + bh / 2 + 1);
@@ -673,16 +712,28 @@ function drawHud(w) {
     ctx.fill();
   }
   roundRect(bx, y, bw, bh, 8); ctx.strokeStyle = INK; ctx.lineWidth = 3; ctx.stroke();
-  // 거리와 젤리
-  ctx.textAlign = 'right'; ctx.font = "20px 'Jua', sans-serif"; ctx.lineJoin = 'round';
+  ctx.lineJoin = 'round';
+  if (full) {
+    // 폰 전체화면: 점수판 알약이 없으니 점수와 최고 기록을 위쪽 가운데에 그린다
+    ctx.textAlign = 'center';
+    ctx.font = "30px 'Jua', sans-serif"; ctx.strokeStyle = INK; ctx.lineWidth = 6; ctx.fillStyle = '#ffd23f';
+    const sc = scoreOf(w).toLocaleString();
+    ctx.strokeText(sc, VW / 2, 30); ctx.fillText(sc, VW / 2, 30);
+    ctx.font = "13px 'Jua', sans-serif"; ctx.lineWidth = 4; ctx.fillStyle = '#fff';
+    const bt = `BEST ${best.toLocaleString()}`;
+    ctx.strokeText(bt, VW / 2, 52); ctx.fillText(bt, VW / 2, 52);
+  }
+  // 거리와 젤리 (폰에서는 오른쪽 위 일시정지·소리 버튼 왼쪽에)
+  const rx = VW - 14 - SAFE_R - (full ? 92 : 0);
+  ctx.textAlign = 'right'; ctx.font = "20px 'Jua', sans-serif";
   ctx.strokeStyle = INK; ctx.lineWidth = 5; ctx.fillStyle = '#fff';
   const t1 = `${meters(w).toLocaleString()}m`;
-  ctx.strokeText(t1, W - 14, 24); ctx.fillText(t1, W - 14, 24);
+  ctx.strokeText(t1, rx, 24); ctx.fillText(t1, rx, 24);
   ctx.font = "15px 'Jua', sans-serif"; ctx.fillStyle = '#ffd23f';
   const t2 = `🍬 ${w.jellies}`;
-  ctx.strokeText(t2, W - 14, 46); ctx.fillText(t2, W - 14, 46);
+  ctx.strokeText(t2, rx, 46); ctx.fillText(t2, rx, 46);
   // 효과 타이머
-  let ex = 16;
+  let ex = 16 + SAFE_L;
   const badge = (label, col, t, max) => {
     roundRect(ex, 40, 64, 18, 9); ctx.fillStyle = 'rgba(43,29,82,.6)'; ctx.fill();
     roundRect(ex + 2, 42, Math.max(6, 60 * t / max), 14, 7); ctx.fillStyle = col; ctx.fill();
@@ -705,7 +756,7 @@ function drawScene(w, dt) {
     }
     for (const it of w.items) { if (it.t === 'jelly') drawJelly(it, uiT); else drawPickup(it, uiT); }
     // 부스터 속도선
-    if (w.boostT > 0) { ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 3; for (let i = 0; i < 9; i++) { const y = 30 + i * 34 + (uiT * 900 + i * 97) % 20, x = ((i * 233 - uiT * 1600) % W + W) % W; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + 50, y); ctx.stroke(); } }
+    if (w.boostT > 0) { ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 3; for (let i = 0; i < 9; i++) { const y = 30 + i * 34 + (uiT * 900 + i * 97) % 20, x = ((i * 233 - uiT * 1600) % VW + VW) % VW; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + 50, y); ctx.stroke(); } }
     drawCookie(w, uiT);
   } else {
     // 타이틀 뒤: 달리는 쿠키
@@ -725,10 +776,10 @@ function drawScene(w, dt) {
     const into = m - zone * 400;
     if (zone > 0 && into < 40) {
       ctx.globalAlpha = Math.min(1, (40 - into) / 15); ctx.font = "30px 'Jua', sans-serif"; ctx.textAlign = 'center';
-      ctx.strokeStyle = INK; ctx.lineWidth = 7; ctx.strokeText(BIOMES[zone % 3].name, W / 2, 120); ctx.fillStyle = '#fff'; ctx.fillText(BIOMES[zone % 3].name, W / 2, 120);
+      ctx.strokeStyle = INK; ctx.lineWidth = 7; ctx.strokeText(BIOMES[zone % 3].name, VW / 2, 120); ctx.fillStyle = '#fff'; ctx.fillText(BIOMES[zone % 3].name, VW / 2, 120);
       ctx.globalAlpha = 1;
     }
-    if (w.hp < 25 && state === 'play') { ctx.fillStyle = `rgba(255,60,90,${0.12 + 0.1 * Math.sin(uiT * 9)})`; ctx.fillRect(0, 0, W, H); }
+    if (w.hp < 25 && state === 'play') { ctx.fillStyle = `rgba(255,60,90,${0.12 + 0.1 * Math.sin(uiT * 9)})`; ctx.fillRect(0, 0, VW, H); }
   }
   ctx.restore();
 }
