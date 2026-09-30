@@ -24,6 +24,12 @@ const HALF_W = 13;                  // 쿠키 몸 절반 폭
 const STAND_H = 50, SLIDE_H = 24;
 const HANG_CLEAR = 42;              // 매달린 장애물 아래 틈: 서 있으면 부딪히고(50) 슬라이드하면(24) 지나간다
 const COYOTE = 0.09, JUMP_BUF = 0.12;
+const SNAP_R = 60;                  // 젤리가 쿠키 쪽으로 끌려오기 시작하는 거리
+const SPRING_V = 1000;              // 스프링을 밟으면 튀어 오르는 속도 (꼭대기 약 260px, 그 뒤 2단 점프도 가능)
+// 움직이는 장애물
+const BAT_VX = 70;                  // 박쥐는 세상보다 이만큼 더 빨리 다가온다
+const BAT_BASE = 68, BAT_AMP = 32, BAT_OM = 4.2;    // 박쥐 높이(발 기준)가 출렁이는 범위: 36~100. 슬라이드하면 언제나 지나갈 수 있다
+const BALL_VX = 150;                // 굴러오는 사탕공은 더 빨리 굴러온다
 
 // ---------- Random ----------
 function rand(w) {
@@ -35,67 +41,168 @@ function rand(w) {
 
 // ---------- Patterns ----------
 // dx 는 패턴 시작점에서 오른쪽으로, h 는 바닥에서 위로의 높이(젤리 중심).
-const jelly = (dx, h, c = 0, v = 10) => ({ t: 'jelly', dx, h, c, v });
+const jelly = (dx, h, c = 0, v = 10, big = false) => ({ t: 'jelly', dx, h, c, v, big });
 function line(x0, n, h = 28, step = 44) { const a = []; for (let i = 0; i < n; i++) a.push(jelly(x0 + i * step, h, i % 4)); return a; }
-function arc(x0, x1, apex, n, base = 28) {
-  const a = [];
-  for (let i = 0; i < n; i++) { const u = n === 1 ? 0.5 : i / (n - 1); a.push(jelly(x0 + (x1 - x0) * u, base + apex * 4 * u * (1 - u), i % 4)); }
-  return a;
+
+// 점프 궤적 위에 젤리를 놓는다: 게임 물리(stepWorld)와 같은 식으로 '끝까지 누른 점프'의 발 높이를 시간별로 계산해 두고,
+// 달리는 속도(x = 속도 × 시간)만큼 앞으로 펼친다. 그래서 타이밍을 맞춰 뛰면 곡선을 그대로 따라가며 다 먹을 수 있다.
+const JDT = 1 / 120;
+function jumpPath(second, v0 = JUMP_V) {
+  const f = [0];                                   // f[i] = i번째 스텝의 발이 바닥에서 떠 있는 높이
+  let y = 0, vy = -v0, t = 0, did = false;
+  for (;;) {
+    vy += GRAV * JDT; y += vy * JDT; t += JDT;
+    if (second && !did && vy >= 0) { vy = -JUMP2_V; did = true; }   // 2단 점프는 꼭대기에서 한 번 더
+    f.push(-y);
+    if (y >= 0 && t > 0.05) break;
+  }
+  return { f, T: t };
 }
+const PATH1 = jumpPath(false), PATH2 = jumpPath(true), PATH_SPRING = jumpPath(false, SPRING_V);
+const JELLY_STEP = 0.075;                          // 젤리 사이 시간 간격(초)
+const halfSpan = (spd, path = PATH1) => spd * path.T / 2;       // 점프 한 번에 날아가는 거리의 절반
+// center: 이 점프의 한가운데가 오는 x. 젤리 중심은 쿠키 몸 중심(발 + 26). bigTop 이면 꼭대기 젤리는 큰 젤리
+function arcAt(center, spd, path = PATH1, bigTop = false) {
+  const out = [], half = halfSpan(spd, path);
+  let topI = -1, topF = -1;
+  for (let t = JELLY_STEP, i = 0; t < path.T - 0.03; t += JELLY_STEP, i++) {
+    const f = path.f[Math.round(t / JDT)];
+    if (f > topF) { topF = f; topI = i; }
+    out.push(jelly(center - half + spd * t, 26 + f, i % 4));
+  }
+  if (bigTop && out[topI]) { out[topI].big = true; out[topI].v = 50; }
+  return out;
+}
+
+// 장애물. h 는 높이(또는 발판이 떠 있는 높이)
 const spike = (dx, w = 36) => ({ t: 'spike', dx, w, h: 38 });
 const thorn = (dx) => ({ t: 'thorn', dx, w: 40, h: 84 });
 const hang = (dx, w = 150) => ({ t: 'hang', dx, w });
 const pit = (dx, w) => ({ t: 'pit', dx, w });
+const wall = (dx) => ({ t: 'wall', dx, w: 36, h: 185 });            // 한 번 점프로는 못 넘는 높은 벽: 2단 점프
+const bat = (dx, ph) => ({ t: 'bat', dx, w: 46, h: 26, vx: BAT_VX, ph });   // 위아래로 출렁이며 다가오는 박쥐
+const ball = (dx) => ({ t: 'ball', dx, w: 34, h: 34, vx: BALL_VX });       // 굴러오는 사탕공
+const platform = (dx, w = 220, h = 78) => ({ t: 'platform', dx, w, h });    // 올라탈 수 있는 발판 (아래로 지나가도 된다)
+const spring = (dx) => ({ t: 'spring', dx, w: 40, h: 16 });                 // 밟으면 높이 튀어 오름
 
 // 장애물 사이 간격은 속도가 아니라 '시간'으로 잡는다 (빨라져도 반응할 시간이 비슷하게 남도록)
-const gapFor = (spd) => spd * 0.85 + 60;
+const gapFor = (spd) => spd * 0.85 + 60;           // 따로 나오는 패턴 사이
+const chainGap = (spd) => spd * 0.45 + 30;         // 한 패턴 안에서 이어 붙인 장애물 사이
+const spawnGap = (spd) => spd * 0.6 + 60;          // 패턴과 패턴 사이 (패턴 끝의 젤리 곡선 뒤에 더해진다)
 
-const PATTERNS = [
-  { id: 'line', minM: 0, w0: 4, w1: 1, build: () => ({ len: 360, obs: [], items: line(20, 8) }) },
-  { id: 'arc', minM: 0, w0: 3, w1: 2, build: () => ({ len: 340, obs: [], items: arc(20, 320, 110, 9) }) },
-  { id: 'sky', minM: 60, w0: 0, w1: 2, build: () => ({ len: 380, obs: [], items: arc(20, 360, 190, 10, 40) }) },
-  { id: 'spike1', minM: 0, w0: 5, w1: 3, build: () => ({ len: 300, obs: [spike(110)], items: arc(40, 230, 100, 8) }) },
-  { id: 'spike2', minM: 30, w0: 2, w1: 3, build: () => ({ len: 340, obs: [spike(110), spike(200)], items: arc(40, 320, 105, 9) }) },
-  { id: 'spike3', minM: 120, w0: 0, w1: 3, build: () => ({ len: 400, obs: [spike(110), spike(190), spike(270)], items: arc(40, 360, 110, 10) }) },
-  { id: 'thorn', minM: 40, w0: 1, w1: 3, build: () => ({ len: 320, obs: [thorn(120)], items: arc(50, 250, 118, 8) }) },
-  { id: 'hang', minM: 100, w0: 0, w1: 4, build: () => ({ len: 400, obs: [hang(110, 150)], items: line(90, 6, 22, 38) }) },
-  { id: 'pit', minM: 180, w0: 0, w1: 4, build: (r, s, w) => { const pw = 120 + Math.floor(rand(w) * 5) * 14; return { len: pw + 300, obs: [pit(170, pw)], items: arc(80, 170 + pw + 90, 115, 9) }; } },
-  { id: 'spikeHang', minM: 300, w0: 0, w1: 3, build: (r, s) => { const g = gapFor(s); return { len: 110 + 36 + g + 150 + 60, obs: [spike(110), hang(110 + 36 + g, 150)], items: [...arc(40, 230, 100, 7), ...line(110 + 36 + g + 20, 4, 22, 38)] }; } },
-  { id: 'pitThorn', minM: 400, w0: 0, w1: 3, build: (r, s, w) => { const g = gapFor(s), pw = 130; return { len: 170 + pw + g + 40 + 80, obs: [pit(170, pw), thorn(170 + pw + g)], items: arc(80, 170 + pw + 90, 110, 8) }; } },
-  { id: 'hangPit', minM: 500, w0: 0, w1: 3, build: (r, s, w) => { const g = gapFor(s), pw = 140; return { len: 110 + 150 + g + pw + 120, obs: [hang(110, 150), pit(110 + 150 + g, pw)], items: [...line(90, 6, 22, 38), ...arc(110 + 150 + g - 60, 110 + 150 + g + pw + 60, 110, 8)] }; } },
+// ---- 조각(primitive): 중심 c 기준으로 장애물과 젤리를 만든다. half = 이 조각이 차지하는 좌우 반폭
+const PRIM = {
+  line: { half: () => 160, build: (c) => ({ obs: [], items: line(c - 154, 8) }) },
+  arc: { half: (s) => halfSpan(s), build: (c, s) => ({ obs: [], items: arcAt(c, s) }) },
+  sky: { half: (s) => halfSpan(s, PATH2), build: (c, s) => ({ obs: [], items: arcAt(c, s, PATH2, true) }) },
+  spike1: { half: (s) => halfSpan(s), build: (c, s) => ({ obs: [spike(c - 18)], items: arcAt(c, s) }) },
+  spike2: { half: (s) => halfSpan(s), build: (c, s) => ({ obs: [spike(c - 63), spike(c + 27)], items: arcAt(c, s) }) },
+  spike3: { half: (s) => halfSpan(s), build: (c, s) => ({ obs: [spike(c - 98), spike(c - 18), spike(c + 62)], items: arcAt(c, s) }) },
+  thorn: { half: (s) => halfSpan(s), build: (c, s) => ({ obs: [thorn(c - 20)], items: arcAt(c, s) }) },
+  hang: { half: () => 110, build: (c) => ({ obs: [hang(c - 75, 150)], items: line(c - 95, 6, 22, 38) }) },
+  pit: { half: (s) => halfSpan(s), build: (c, s, w) => { const pw = 120 + Math.floor(rand(w) * 5) * 14; return { obs: [pit(c - pw / 2, pw)], items: arcAt(c, s) }; } },
+  wall: { half: (s) => halfSpan(s, PATH2), build: (c, s) => ({ obs: [wall(c - 18)], items: arcAt(c, s, PATH2, true) }) },
+  bat: { half: () => 110, build: (c, s, w) => ({ obs: [bat(c - 23, rand(w) * 6.28)], items: line(c - 76, 5, 24, 38) }) },
+  // 사탕공은 세상보다 빨리 굴러와서, 공이 쿠키를 지나는 때에 맞춰 젤리 곡선을 놓는다 (공은 곡선보다 오른쪽 먼 곳에서 출발)
+  ball: { half: (s) => halfSpan(s), build: (c, s, w, x0) => {
+    const xs = x0 + c, xb = CX + (xs - CX) * (s + BALL_VX) / s;      // 공이 같은 순간에 쿠키에 닿도록 공의 출발 위치를 앞으로 미룬다
+    return { obs: [ball(xb - x0 - 17)], items: arcAt(c, s), end: xb - x0 + 40 };
+  } },
+  platform: { half: () => 140, build: (c) => ({ obs: [platform(c - 110)], items: [...line(c - 85, 6, 78 + 26, 34), ...line(c - 85, 6, 28, 34)] }) },
+  platPit: { half: () => 170, build: (c) => ({ obs: [pit(c - 115, 230), platform(c - 125, 250)], items: line(c - 100, 7, 78 + 26, 34) }) },
+  spring: { half: (s) => halfSpan(s, PATH_SPRING) + 20, build: (c, s) => {
+    const h = halfSpan(s, PATH_SPRING);
+    return { obs: [spring(c - h - 20)], items: arcAt(c, s, PATH_SPRING, true) };
+  } },
+};
+
+// 종류별 설정: min = 이 거리(m)부터 나옴, w = [처음 가중치, 많이 달린 뒤 가중치], rest = 장애물 없는 쉬어가기
+const KIND_INFO = {
+  line: { min: 0, w: [3, 1], rest: true }, arc: { min: 0, w: [2, 1], rest: true }, sky: { min: 60, w: [0.6, 1.4], rest: true },
+  spike1: { min: 0, w: [5, 2] }, spike2: { min: 30, w: [2, 2] }, thorn: { min: 40, w: [1.4, 2.4] }, spike3: { min: 120, w: [0.5, 2.4] },
+  hang: { min: 100, w: [1.4, 2.6] }, pit: { min: 180, w: [1.2, 2.8] }, bat: { min: 250, w: [1.4, 2.8] }, ball: { min: 320, w: [1.4, 2.8] },
+  wall: { min: 450, w: [1.2, 2.4] }, platform: { min: 500, w: [1.2, 2] }, platPit: { min: 620, w: [1, 2] }, spring: { min: 560, w: [1, 1.8] },
+};
+// 구역(400m마다)마다 자주 나오는 장애물이 달라진다
+const FAVOR = [
+  ['spike1', 'spike2', 'spike3', 'pit', 'hang', 'arc'],          // 사탕 나라
+  ['thorn', 'ball', 'bat', 'wall', 'line'],                      // 초코 숲
+  ['platform', 'platPit', 'spring', 'sky', 'bat', 'pit'],        // 별밤 정원
 ];
+const REST_KINDS = Object.keys(KIND_INFO).filter((k) => KIND_INFO[k].rest);
+const HAZARD_KINDS = Object.keys(KIND_INFO).filter((k) => !KIND_INFO[k].rest);
 
-function pickPattern(w, lv, m) {
-  const list = PATTERNS.filter((p) => m >= p.minM);
-  const weights = list.map((p) => p.w0 + (p.w1 - p.w0) * lv);
-  const total = weights.reduce((a, b) => a + b, 0);
+function pickKind(w, m, lv, pool) {
+  const bi = Math.floor(m / 400) % 3;
+  let total = 0; const list = [];
+  for (const k of pool) {
+    const info = KIND_INFO[k];
+    if (m < info.min) continue;
+    let wt = info.w[0] + (info.w[1] - info.w[0]) * lv;
+    if (FAVOR[bi].includes(k)) wt *= 2.2;
+    if ((w.seen[k] || 0) < 2 && m - info.min < 160) wt *= 3;            // 새로 나온 장애물은 처음 몇 번 자주 보여 준다
+    if (w.recent.includes(k)) wt *= info.rest ? 0.5 : 0.12;              // 같은 것이 연달아 나오지 않게
+    list.push([k, wt]); total += wt;
+  }
   let r = rand(w) * total;
-  for (let i = 0; i < list.length; i++) { r -= weights[i]; if (r <= 0) return list[i]; }
-  return list[0];
+  for (const [k, wt] of list) { r -= wt; if (r <= 0) return k; }
+  return list[list.length - 1][0];
+}
+function composeKinds(w, m, lv) {
+  const pRest = 0.38 - 0.23 * lv;
+  const out = [];
+  if (rand(w) < pRest) { const k = pickKind(w, m, lv, REST_KINDS); out.push(k); w.recent.push(k); }
+  else {
+    const p2 = Math.max(0, Math.min(0.65, (m - 120) / 400)), p3 = Math.max(0, Math.min(0.4, (m - 400) / 600));
+    let n = 1;
+    if (rand(w) < p2) { n = 2; if (rand(w) < p3 / 0.65) n = 3; }
+    for (let i = 0; i < n; i++) {
+      const k = pickKind(w, m, lv, HAZARD_KINDS);
+      out.push(k);
+      w.recent.push(k);                                                  // 조합 안에서도 같은 것이 붙지 않게
+      if ((w.seen[k] || 0) < 1) break;                                   // 처음 보는 장애물은 혼자서 소개한다
+    }
+  }
+  while (w.recent.length > 4) w.recent.shift();
+  for (const k of out) w.seen[k] = (w.seen[k] || 0) + 1;
+  return out;
+}
+function buildChain(w, kinds, x0) {
+  const s = w.baseSpeed, obs = [], items = [];
+  let cursor = 30;
+  kinds.forEach((k, i) => {
+    const pr = PRIM[k], half = pr.half(s), c = cursor + half;
+    const b = pr.build(c, s, w, x0);
+    obs.push(...b.obs); items.push(...b.items);
+    cursor = c + half + (i < kinds.length - 1 ? chainGap(s) : 30);
+  });
+  return { len: cursor, obs, items };
 }
 
 function spawnPattern(w) {
   const x0 = (w.viewW || W) + 60;      // 화면 오른쪽 바깥에서 등장
   const m = w.dist / PX_PER_M, lv = Math.min(1, m / 1200);
-  let pat = null, built;
+  let id, built;
   // 회복 물약, 부스터, 자석은 일정 거리마다 따로 끼워 넣는다
   if (w.hp < 55 && w.sincePotion > 1500) {
     built = { len: 240, obs: [], items: [{ t: 'potion', dx: 60, h: 46 }, ...line(110, 4, 28)] };
-    w.sincePotion = 0; pat = { id: 'potion' };
+    w.sincePotion = 0; id = 'potion';
   } else if (m >= w.nextBoostM) {
     built = { len: 300, obs: [], items: [{ t: 'boost', dx: 60, h: 50 }, ...line(120, 5, 28)] };
-    w.nextBoostM = m + 650 + rand(w) * 300; pat = { id: 'boost' };
+    w.nextBoostM = m + 650 + rand(w) * 300; id = 'boost';
   } else if (m >= w.nextMagnetM) {
     built = { len: 300, obs: [], items: [{ t: 'magnet', dx: 60, h: 50 }, ...line(120, 5, 28)] };
-    w.nextMagnetM = m + 450 + rand(w) * 250; pat = { id: 'magnet' };
+    w.nextMagnetM = m + 450 + rand(w) * 250; id = 'magnet';
   } else {
-    pat = pickPattern(w, lv, m);
-    built = pat.build(rand, w.baseSpeed, w);
+    const kinds = composeKinds(w, m, lv);
+    built = buildChain(w, kinds, x0);
+    id = kinds.join('+');
   }
-  for (const o of built.obs) w.obs.push({ ...o, x: x0 + o.dx, id: w.nextId++ });
+  const sk = Math.floor(m / 400) % 3;                                    // 구역에 따라 장애물 모양(색)이 달라진다
+  for (const o of built.obs) w.obs.push({ ...o, x: x0 + o.dx, id: w.nextId++, sk });
   for (const it of built.items) w.items.push({ ...it, x: x0 + it.dx, y: GROUND - it.h, id: w.nextId++ });
-  w.spawnIn = built.len + gapFor(w.baseSpeed);
-  w.lastPattern = pat.id;
+  w.spawnIn = built.len + spawnGap(w.baseSpeed);
+  w.lastPattern = id;
   w.sincePotion += built.len;
 }
 
@@ -107,7 +214,7 @@ function newWorld(seed = 1) {
     obs: [], items: [], nextId: 1, spawnIn: 260,
     jellyScore: 0, jellies: 0, bonus: 0,
     boostT: 0, magnetT: 0, slowT: 0,
-    sincePotion: 0, nextBoostM: 400, nextMagnetM: 250, lastPattern: '',
+    sincePotion: 0, nextBoostM: 400, nextMagnetM: 250, lastPattern: '', recent: [], seen: {},
     hits: 0, falls: 0, smashes: 0, events: [],
   };
 }
@@ -118,15 +225,30 @@ function overPit(w) {
   for (const o of w.obs) if (o.t === 'pit' && !o.covered && CX > o.x && CX < o.x + o.w) return o;
   return null;
 }
+// 쿠키 발밑의 받침: 바닥(구덩이 위가 아니면)과 발판. 발판은 위에서 내려올 때만 받쳐 준다(아래에서 뛰어오를 땐 통과).
+function supportY(w, feetY) {
+  let best = overPit(w) ? Infinity : GROUND;
+  for (const o of w.obs) {
+    if (o.t !== 'platform' || CX <= o.x || CX >= o.x + o.w) continue;
+    const top = GROUND - o.h;
+    if (feetY <= top + 6 && top < best) best = top;
+  }
+  return best;
+}
+// 박쥐의 중심 높이(발 기준)
+const batHeight = (w, o) => BAT_BASE + BAT_AMP * Math.sin(o.ph + w.t * BAT_OM);
 
 function cookieBox(ck) {
   const h = ck.sliding ? SLIDE_H : STAND_H;
   return { l: CX - HALF_W + 2, r: CX + HALF_W - 2, t: ck.y - h + 4, b: ck.y - 3 };
 }
-function obsBoxes(o) {
+function obsBoxes(o, w) {
   switch (o.t) {
     case 'spike': return [{ l: o.x + o.w * 0.18, r: o.x + o.w * 0.82, t: GROUND - o.h * 0.8, b: GROUND }];
     case 'thorn': return [{ l: o.x + o.w * 0.2, r: o.x + o.w * 0.8, t: GROUND - o.h * 0.94, b: GROUND }];
+    case 'wall': return [{ l: o.x + 3, r: o.x + o.w - 3, t: GROUND - o.h, b: GROUND }];
+    case 'ball': return [{ l: o.x + 5, r: o.x + o.w - 5, t: GROUND - 30, b: GROUND }];
+    case 'bat': { const yc = GROUND - batHeight(w, o); return [{ l: o.x + 8, r: o.x + o.w - 8, t: yc - 13, b: yc + 13 }]; }
     case 'hang': return [{ l: o.x, r: o.x + o.w, t: -50, b: GROUND - HANG_CLEAR }];
     default: return [];
   }
@@ -154,7 +276,7 @@ function stepWorld(w, dt, inp) {
   w.speed = w.baseSpeed * (w.boostT > 0 ? BOOST_MUL : 1) * slowMul;
   const dx = w.speed * dt;
   w.dist += dx;
-  for (const o of w.obs) o.x -= dx;
+  for (const o of w.obs) { o.x -= dx; if (o.vx) o.x -= o.vx * dt; }       // 박쥐·사탕공은 세상보다 더 빨리 다가온다
   for (const it of w.items) it.x -= dx;
   w.obs = w.obs.filter((o) => o.x + (o.w || 60) > -80);
   w.spawnIn -= dx;
@@ -163,7 +285,6 @@ function stepWorld(w, dt, inp) {
   // 타이머
   if (ck.inv > 0) ck.inv = Math.max(0, ck.inv - dt);
   if (w.magnetT > 0) w.magnetT = Math.max(0, w.magnetT - dt);
-  const wasBoost = w.boostT > 0;
   if (w.boostT > 0) { w.boostT = Math.max(0, w.boostT - dt); if (!w.boostT) { ck.inv = Math.max(ck.inv, 1.6); ck.vy = 0; ck.jumps = 1; ck.onGround = false; } }
   else w.hp -= (DRAIN0 + (DRAIN1 - DRAIN0) * Math.min(1, w.t / 240)) * dt;
   ck.anim += dt * (w.speed / 380);
@@ -186,13 +307,18 @@ function stepWorld(w, dt, inp) {
     ck.sliding = !!inp.slide && ck.onGround;
     if (inp.slide && !ck.onGround && ck.vy > -200) ck.vy = Math.max(ck.vy, FAST_FALL);
 
-    if (ck.onGround && overPit(w)) { ck.onGround = false; ck.jumps = Math.max(ck.jumps, 1); ck.coyote = COYOTE; }
+    if (ck.onGround) {
+      // 발밑이 사라지면(구덩이, 발판 끝) 떨어지기 시작한다
+      if (supportY(w, ck.y) > ck.y + 0.5) { ck.onGround = false; ck.jumps = Math.max(ck.jumps, 1); ck.coyote = COYOTE; }
+    }
     if (!ck.onGround) {
+      const prevY = ck.y;
       ck.vy += GRAV * dt;
       ck.y += ck.vy * dt;
-      if (ck.y >= GROUND && ck.vy >= 0) {
-        if (!overPit(w)) {
-          ck.y = GROUND; ck.vy = 0; ck.onGround = true; ck.jumps = 0; ev(w, 'land');
+      if (ck.vy >= 0) {
+        const sup = supportY(w, prevY);
+        if (ck.y >= sup) {
+          ck.y = sup; ck.vy = 0; ck.onGround = true; ck.jumps = 0; ev(w, 'land');
           if (ck.buf > 0) { ck.buf = 0; inp.jump = true; }
         }
       }
@@ -203,13 +329,19 @@ function stepWorld(w, dt, inp) {
         ck.y = GROUND - 170; ck.vy = 0; ck.jumps = 1; ck.onGround = false;
       }
     }
+    // 스프링: 위를 지나가면 높이 튀어 오른다 (뛰어서 넘으면 안 밟는다)
+    for (const o of w.obs) {
+      if (o.t === 'spring' && !o.used && ck.y >= GROUND - 14 && ck.vy >= 0 && Math.abs(o.x + o.w / 2 - CX) < 22) {
+        o.used = true; o.usedT = w.t; ck.vy = -SPRING_V; ck.onGround = false; ck.jumps = 1; ck.cut = true; ev(w, 'spring');
+      }
+    }
   }
 
   // 부딪힘
   const box = cookieBox(ck);
   for (const o of w.obs) {
     if (o.smashed) continue;
-    for (const b of obsBoxes(o)) {
+    for (const b of obsBoxes(o, w)) {
       if (!hit(box, b)) continue;
       if (w.boostT > 0) { o.smashed = true; w.bonus += 15; w.smashes++; ev(w, 'smash', { x: o.x, w: o.w, t: o.t }); }
       else if (ck.inv <= 0) { w.hits++; damage(w, HIT_DMG, 'hit'); }
@@ -220,16 +352,17 @@ function stepWorld(w, dt, inp) {
 
   // 아이템
   const cy = ck.y - (ck.sliding ? 12 : 26);
-  const pullR = w.boostT > 0 ? 300 : w.magnetT > 0 ? 230 : 0;
+  // 젤리는 쿠키가 가까이 지나가면 살짝 빨려 든다: 점프 타이밍이 조금 어긋나도 곡선을 따라 먹을 수 있게 (자석·부스터는 더 넓게)
+  const pullR = w.boostT > 0 ? 300 : w.magnetT > 0 ? 230 : SNAP_R;
   for (const it of w.items) {
     if (pullR && it.t === 'jelly') {
       const ddx = CX - it.x, ddy = cy - it.y, d = Math.hypot(ddx, ddy);
       if (d < pullR) { const s = Math.min(d, 1100 * dt); it.x += ddx / d * s; it.y += ddy / d * s; }
     }
-    const r = it.t === 'jelly' ? 12 : 18;
+    const r = it.t === 'jelly' ? (it.big ? 18 : 12) : 18;
     if (Math.hypot(it.x - CX, it.y - cy) < r + 20) {
       it.got = true;
-      if (it.t === 'jelly') { w.jellyScore += it.v; w.jellies++; ev(w, 'jelly', { x: it.x, y: it.y, c: it.c }); }
+      if (it.t === 'jelly') { w.jellyScore += it.v; w.jellies++; ev(w, 'jelly', { x: it.x, y: it.y, c: it.c, big: it.big }); }
       else if (it.t === 'potion') { w.hp = Math.min(HP_MAX, w.hp + POTION_HP); ev(w, 'potion', { x: it.x, y: it.y }); }
       else if (it.t === 'boost') { w.boostT = BOOST_T; ck.inv = Math.max(ck.inv, BOOST_T + 1.6); ev(w, 'boost', { x: it.x, y: it.y }); }
       else if (it.t === 'magnet') { w.magnetT = MAGNET_T; ev(w, 'magnet', { x: it.x, y: it.y }); }
@@ -242,7 +375,8 @@ function stepWorld(w, dt, inp) {
 
 if (typeof document === 'undefined') {
   module.exports = {
-    W, H, GROUND, CX, PX_PER_M, JUMP_V, JUMP2_V, GRAV, SPEED0, SPEED_MAX, HP_MAX, PATTERNS,
+    W, H, GROUND, CX, PX_PER_M, JUMP_V, JUMP2_V, GRAV, SPEED0, SPEED_MAX, HP_MAX, PRIM, KIND_INFO, FAVOR, PATH1, PATH2, PATH_SPRING, halfSpan,
+    composeKinds, buildChain, pickKind, supportY, batHeight, SPRING_V, BALL_VX, BAT_VX,
     newWorld, stepWorld, meters, scoreOf, spawnPattern, overPit, cookieBox, obsBoxes, gapFor,
   };
 } else {
@@ -353,6 +487,8 @@ const sfx = {
   boost: () => seq([392, 523, 659, 784, 1047], 60, 'square', 0.06),
   magnet: () => seq([440, 660], 80, 'triangle', 0.09),
   smash: () => tone(260, 0.12, 'square', 0.07, -160),
+  spring: () => { tone(260, 0.3, 'sine', 0.1, 700); tone(520, 0.2, 'triangle', 0.06, 500); },
+  big: () => seq([880, 1175, 1568], 55, 'triangle', 0.09),
   dead: () => seq([392, 330, 262, 196], 170, 'triangle', 0.1),
 };
 
@@ -412,12 +548,16 @@ function handleEvents(evs) {
     if (e.type === 'jump') { sfx.jump(); burst(CX, GROUND, '#fff', 5, 60, 20); }
     else if (e.type === 'djump') { sfx.djump(); burst(CX, ck.y, '#fff8c4', 8, 70, 10); }
     else if (e.type === 'land') { sfx.land(); burst(CX, GROUND, '#fff', 3, 50, 10); }
-    else if (e.type === 'jelly') { sfx.jelly(); burst(e.x, e.y, JELLY_COL[e.c], 4, 70, 30); }
+    else if (e.type === 'jelly') {
+      if (e.big) { sfx.big(); burst(e.x, e.y, '#ffd23f', 14, 130, 40); floatText('+50', e.x, e.y - 20, '#ffd23f'); }
+      else { sfx.jelly(); burst(e.x, e.y, JELLY_COL[e.c], 4, 70, 30); }
+    }
     else if (e.type === 'hit') { sfx.hit(); try { if (navigator.vibrate && (!navigator.userActivation || navigator.userActivation.hasBeenActive)) navigator.vibrate(40); } catch (_) {} shake = 0.3; hpFlash = 0.5; burst(CX, ck.y - 26, '#ff5f7a', 12, 150); floatText('-18', CX, ck.y - 60, '#ff5f7a'); }
     else if (e.type === 'fall') { sfx.fall(); shake = 0.35; hpFlash = 0.5; floatText('-25', CX, GROUND - 160, '#ff5f7a'); }
     else if (e.type === 'potion') { sfx.potion(); burst(e.x, e.y, '#ff7ab6', 12, 110); floatText('+30', CX, ck.y - 60, '#7ee39a'); }
     else if (e.type === 'boost') { sfx.boost(); burst(CX, ck.y - 26, '#ffd23f', 18, 200); floatText('부스터!', VW / 2, 150, '#ffd23f'); }
     else if (e.type === 'magnet') { sfx.magnet(); floatText('자석!', VW / 2, 150, '#5ab8ff'); }
+    else if (e.type === 'spring') { sfx.spring(); burst(CX, GROUND, '#5ab8ff', 10, 120, 80); floatText('슝~!', CX + 40, ck.y - 60, '#5ab8ff'); }
     else if (e.type === 'smash') { sfx.smash(); burst(e.x + (e.w || 40) / 2, GROUND - 30, '#ffb3d9', 14, 200); shake = 0.15; }
     else if (e.type === 'dead') { sfx.dead(); onDead(); }
   }
@@ -453,7 +593,8 @@ function showTitle() {
     <div class="help">
       ⌨️ Space·↑ 점프 (한 번 더 누르면 2단 점프) · ↓ 슬라이드<br>
       📱 오른쪽 버튼 점프 · 왼쪽 버튼 슬라이드<br>
-      🍬 젤리 · 🧪 물약(체력) · ⚡ 부스터(장애물 박살) · 🧲 자석
+      🍬 젤리 · 🧪 물약(체력) · ⚡ 부스터(장애물 박살) · 🧲 자석<br>
+      🦇 박쥐는 슬라이드 · 🧱 높은 벽은 2단 점프 · 🟦 스프링·발판으로 높이!
     </div>`);
   $('startBtn').onclick = startGame;
 }
@@ -581,50 +722,147 @@ function drawGround(w, bi) {
   }
 }
 
+// 구역(sk 0 사탕 나라 · 1 초코 숲 · 2 별밤 정원)마다 장애물의 색과 모양이 달라진다
+const SK = {
+  spike: [['#e0357f', '#ff4f9a', 'rgba(255,255,255,.85)'], ['#5a2f17', '#7a4423', '#f3e2c7'], ['#22a7cf', '#6fdcff', '#eafcff']],
+  cane: [['#fff', '#ff5f7a'], ['#7a4423', '#c98a5c'], ['#e9dcff', '#8f7be8']],
+  bar: [['#ffd23f', '#ff9f1c'], ['#c98a5c', '#8a5a3a'], ['#c9b8ff', '#7a5ad6']],
+  block: [['#ffc2dc', '#ff7ab6'], ['#8a5a3a', '#5e3a22'], ['#8fe6ff', '#3fa9d8']],
+  bat: [['#9b59d0', '#e7ccff'], ['#5e3a22', '#ffb347'], ['#5ad8ff', '#e9fbff']],
+  ball: [['#fff', '#ff5f7a'], ['#5e3a22', '#c98a5c'], ['#5ab8ff', '#e9fbff']],
+  slab: [['#ffb3d9', '#ff7ab6'], ['#7a4423', '#c98a5c'], ['#a98aff', '#7a5ad6']],
+};
+const skOf = (o) => o.sk || 0;
+
 function drawSpike(o) {
+  const sk = skOf(o), [c0, c1, hi] = SK.spike[sk];
   const n = Math.max(1, Math.round(o.w / 36));
   for (let i = 0; i < n; i++) {
     const x = o.x + (o.w / n) * i, ww = o.w / n;
-    ctx.fillStyle = i % 2 ? '#e0357f' : '#ff4f9a';
+    ctx.fillStyle = i % 2 ? c0 : c1;
     ctx.beginPath(); ctx.moveTo(x, GROUND); ctx.lineTo(x + ww / 2, GROUND - o.h); ctx.lineTo(x + ww, GROUND); ctx.closePath();
     ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 4; ctx.lineJoin = 'round'; ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.beginPath(); ctx.moveTo(x + ww / 2 - 3, GROUND - o.h + 10); ctx.lineTo(x + ww / 2 + 1, GROUND - o.h + 8); ctx.lineTo(x + ww / 2 - 6, GROUND - 12); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = hi;
+    if (sk === 1) { ctx.beginPath(); ctx.moveTo(x + ww / 2, GROUND - o.h); ctx.lineTo(x + ww / 2 + 7, GROUND - o.h + 14); ctx.lineTo(x + ww / 2 - 7, GROUND - o.h + 14); ctx.closePath(); ctx.fill(); }   // 초코 끝의 크림
+    else { ctx.beginPath(); ctx.moveTo(x + ww / 2 - 3, GROUND - o.h + 10); ctx.lineTo(x + ww / 2 + 1, GROUND - o.h + 8); ctx.lineTo(x + ww / 2 - 6, GROUND - 12); ctx.closePath(); ctx.fill(); }
+    if (sk === 2) { ctx.fillStyle = 'rgba(111,220,255,.25)'; ctx.beginPath(); ctx.arc(x + ww / 2, GROUND - o.h / 2, 26, 0, 7); ctx.fill(); }   // 수정의 빛
   }
 }
 function drawThorn(o) {
-  // 막대사탕 기둥
+  const sk = skOf(o), [a, b] = SK.cane[sk];
   const x = o.x, y = GROUND - o.h;
   roundRect(x + 4, y, o.w - 8, o.h, 10);
-  ctx.fillStyle = '#fff'; ctx.fill();
+  ctx.fillStyle = a; ctx.fill();
   ctx.save(); roundRect(x + 4, y, o.w - 8, o.h, 10); ctx.clip();
-  ctx.fillStyle = '#ff5f7a';
-  for (let i = -2; i < 8; i++) { ctx.beginPath(); ctx.moveTo(x, y + i * 22); ctx.lineTo(x + o.w, y + i * 22 - 16); ctx.lineTo(x + o.w, y + i * 22 + 2); ctx.lineTo(x, y + i * 22 + 18); ctx.fill(); }
+  ctx.fillStyle = b;
+  if (sk === 1) { for (let i = 0; i < 6; i++) ctx.fillRect(x, y + i * 16 + 6, o.w, 6); }          // 초코 통나무의 나이테 줄
+  else for (let i = -2; i < 8; i++) { ctx.beginPath(); ctx.moveTo(x, y + i * 22); ctx.lineTo(x + o.w, y + i * 22 - 16); ctx.lineTo(x + o.w, y + i * 22 + 2); ctx.lineTo(x, y + i * 22 + 18); ctx.fill(); }
   ctx.restore();
   ctx.strokeStyle = INK; ctx.lineWidth = 3; roundRect(x + 4, y, o.w - 8, o.h, 10); ctx.stroke();
+  if (sk === 2) { ctx.fillStyle = 'rgba(143,123,232,.25)'; ctx.beginPath(); ctx.arc(x + o.w / 2, y + o.h / 2, 42, 0, 7); ctx.fill(); }
 }
 function drawHang(o) {
+  const sk = skOf(o), [a, b] = SK.bar[sk];
   const by = GROUND - HANG_CLEAR;
   ctx.strokeStyle = INK; ctx.lineWidth = 4;
   for (const fx of [o.x + 16, o.x + o.w - 16]) { ctx.beginPath(); ctx.moveTo(fx, -4); ctx.lineTo(fx, by - 22); ctx.stroke(); }
   roundRect(o.x, by - 26, o.w, 26, 13);
-  ctx.fillStyle = '#ffd23f'; ctx.fill(); ctx.stroke();
+  ctx.fillStyle = a; ctx.fill(); ctx.stroke();
   ctx.save(); roundRect(o.x, by - 26, o.w, 26, 13); ctx.clip();
-  ctx.fillStyle = '#ff9f1c';
+  ctx.fillStyle = b;
   for (let sx = o.x - 10; sx < o.x + o.w; sx += 30) { ctx.beginPath(); ctx.moveTo(sx, by); ctx.lineTo(sx + 14, by - 26); ctx.lineTo(sx + 26, by - 26); ctx.lineTo(sx + 12, by); ctx.fill(); }
   ctx.restore();
   ctx.strokeStyle = INK; roundRect(o.x, by - 26, o.w, 26, 13); ctx.stroke();
-  // 경고 표시
   ctx.fillStyle = INK; ctx.font = "bold 13px 'Jua', sans-serif"; ctx.textAlign = 'center'; ctx.fillText('⬇ 슬라이드', o.x + o.w / 2, by - 33);
+}
+function drawWall(o) {
+  const sk = skOf(o), [a, b] = SK.block[sk];
+  const n = 5, bh = o.h / n;
+  ctx.lineJoin = 'round'; ctx.strokeStyle = INK; ctx.lineWidth = 3;
+  for (let i = 0; i < n; i++) {
+    const y = GROUND - (i + 1) * bh;
+    roundRect(o.x + 2, y + 1, o.w - 4, bh - 2, 7);
+    ctx.fillStyle = i % 2 ? a : b; ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.fillRect(o.x + 7, y + 6, o.w - 14, 4);
+  }
+  ctx.fillStyle = INK; ctx.font = "bold 12px 'Jua', sans-serif"; ctx.textAlign = 'center'; ctx.fillText('2단 점프!', o.x + o.w / 2, GROUND - o.h - 10);
+  if (sk === 2) { ctx.fillStyle = 'rgba(143,230,255,.22)'; ctx.beginPath(); ctx.arc(o.x + o.w / 2, GROUND - o.h / 2, 70, 0, 7); ctx.fill(); }
+}
+function drawBat(o, w) {
+  const sk = skOf(o), [body, acc] = SK.bat[sk];
+  const cx = o.x + o.w / 2, cy = GROUND - batHeight(w, o);
+  const flap = Math.sin(uiT * 20 + o.ph) * 0.7;
+  ctx.lineJoin = 'round'; ctx.lineWidth = 3; ctx.strokeStyle = INK;
+  for (const d of [-1, 1]) {           // 날개
+    ctx.save(); ctx.translate(cx + d * 8, cy - 2); ctx.rotate(d * (-0.5 + flap * 0.6)); ctx.scale(d, 1);
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.quadraticCurveTo(14, -18, 30, -6); ctx.quadraticCurveTo(24, 0, 28, 8); ctx.quadraticCurveTo(14, 2, 0, 8); ctx.closePath();
+    ctx.fillStyle = body; ctx.fill(); ctx.stroke(); ctx.restore();
+  }
+  ctx.beginPath(); ctx.ellipse(cx, cy, 13, 12, 0, 0, 7); ctx.fillStyle = body; ctx.fill(); ctx.stroke();      // 몸
+  ctx.beginPath(); ctx.moveTo(cx - 9, cy - 8); ctx.lineTo(cx - 6, cy - 17); ctx.lineTo(cx - 2, cy - 10); ctx.moveTo(cx + 9, cy - 8); ctx.lineTo(cx + 6, cy - 17); ctx.lineTo(cx + 2, cy - 10); ctx.stroke();   // 귀
+  ctx.fillStyle = acc; ctx.beginPath(); ctx.arc(cx - 5, cy - 2, 3.4, 0, 7); ctx.arc(cx + 5, cy - 2, 3.4, 0, 7); ctx.fill();
+  ctx.fillStyle = INK; ctx.beginPath(); ctx.arc(cx - 5, cy - 2, 1.5, 0, 7); ctx.arc(cx + 5, cy - 2, 1.5, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.fillRect(cx - 3, cy + 4, 2, 4); ctx.fillRect(cx + 1, cy + 4, 2, 4);
+  if (sk === 2) { ctx.fillStyle = 'rgba(90,216,255,.22)'; ctx.beginPath(); ctx.arc(cx, cy, 34, 0, 7); ctx.fill(); }
+}
+function drawBall(o) {
+  const sk = skOf(o), [a, b] = SK.ball[sk];
+  const r = 17, cx = o.x + r, cy = GROUND - r;
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(o.x / r);       // 굴러가며 돈다
+  ctx.lineJoin = 'round'; ctx.lineWidth = 3; ctx.strokeStyle = INK;
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.fillStyle = a; ctx.fill();
+  ctx.save(); ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.clip();
+  ctx.fillStyle = b;
+  if (sk === 1) { for (const [x, y] of [[-6, -6], [6, -3], [-2, 7], [8, 8], [-10, 4]]) { ctx.beginPath(); ctx.arc(x, y, 3, 0, 7); ctx.fill(); } }   // 초코볼 알갱이
+  else for (let i = 0; i < 4; i++) { ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, r + 4, i * Math.PI / 2, i * Math.PI / 2 + 0.8); ctx.closePath(); ctx.fill(); }   // 페퍼민트 소용돌이
+  ctx.restore();
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.beginPath(); ctx.ellipse(cx - 6, cy - 7, 3, 5, 0.6, 0, 7); ctx.fill();
+  if (sk === 2) { ctx.fillStyle = 'rgba(90,184,255,.22)'; ctx.beginPath(); ctx.arc(cx, cy, 30, 0, 7); ctx.fill(); }
+  // 굴러오는 방향 표시
+  ctx.strokeStyle = 'rgba(43,29,82,.35)'; ctx.lineWidth = 3;
+  for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.moveTo(o.x + o.w + 10 + i * 14, cy - 6 + i * 6); ctx.lineTo(o.x + o.w + 26 + i * 14, cy - 6 + i * 6); ctx.stroke(); }
+}
+function drawPlatform(o) {
+  const sk = skOf(o), [a, b] = SK.slab[sk];
+  const y = GROUND - o.h;
+  ctx.fillStyle = 'rgba(43,29,82,.18)'; ctx.fillRect(o.x + 6, GROUND - 4, o.w - 12, 4);          // 바닥의 그림자
+  ctx.lineJoin = 'round'; ctx.strokeStyle = INK; ctx.lineWidth = 3;
+  roundRect(o.x, y, o.w, 18, 8); ctx.fillStyle = a; ctx.fill(); ctx.stroke();
+  ctx.save(); roundRect(o.x, y, o.w, 18, 8); ctx.clip();
+  ctx.fillStyle = b; ctx.fillRect(o.x, y + 10, o.w, 8);
+  ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.fillRect(o.x, y, o.w, 5);
+  for (let gx = o.x + 14; gx < o.x + o.w - 6; gx += 28) { ctx.fillStyle = 'rgba(0,0,0,.12)'; ctx.fillRect(gx, y + 9, 6, 3); }
+  ctx.restore();
+  ctx.strokeStyle = INK; roundRect(o.x, y, o.w, 18, 8); ctx.stroke();
+  if (sk === 2) { ctx.fillStyle = 'rgba(169,138,255,.2)'; ctx.fillRect(o.x - 6, y - 8, o.w + 12, 34); }
+}
+function drawSpring(o) {
+  const cx = o.x + o.w / 2;
+  const k = o.used ? Math.max(0, 1 - (uiT - (o.usedUi || (o.usedUi = uiT))) * 3) : 0;     // 밟은 직후 잠깐 길게 늘어난다
+  const up = 12 + k * 18;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.strokeStyle = INK; ctx.lineWidth = 7;
+  ctx.beginPath(); ctx.moveTo(cx - 10, GROUND); for (let i = 0; i < 5; i++) { ctx.lineTo(cx + (i % 2 ? -10 : 10), GROUND - (i + 1) * up / 5); } ctx.stroke();
+  ctx.strokeStyle = '#c9d3e8'; ctx.lineWidth = 3.5;
+  ctx.beginPath(); ctx.moveTo(cx - 10, GROUND); for (let i = 0; i < 5; i++) { ctx.lineTo(cx + (i % 2 ? -10 : 10), GROUND - (i + 1) * up / 5); } ctx.stroke();
+  roundRect(cx - 19, GROUND - up - 9, 38, 10, 5); ctx.fillStyle = '#5ab8ff'; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 3; ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.6)'; ctx.fillRect(cx - 13, GROUND - up - 7, 14, 3);
+  if (!o.used) { ctx.fillStyle = INK; ctx.font = "bold 12px 'Jua', sans-serif"; ctx.textAlign = 'center'; ctx.fillText('⬆ 밟기', cx, GROUND - up - 16 + Math.sin(uiT * 6) * 2); }
 }
 
 function drawJelly(it, t) {
-  const r = 11, bob = Math.sin(t * 5 + it.x * 0.05) * 2;
+  const big = !!it.big, k = big ? 1.6 : 1;
+  const r = 11 * k, bob = Math.sin(t * 5 + it.x * 0.05) * 2;
   const x = it.x, y = it.y + bob;
-  ctx.fillStyle = JELLY_COL[it.c]; ctx.strokeStyle = INK; ctx.lineWidth = 2.5; ctx.lineJoin = 'round';
-  ctx.beginPath(); ctx.arc(x - 6, y - 8, 4.5, 0, 7); ctx.arc(x + 6, y - 8, 4.5, 0, 7); ctx.fill(); ctx.stroke();
-  roundRect(x - r, y - r + 2, r * 2, r * 2 - 2, 8); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = 'rgba(255,255,255,.65)'; ctx.beginPath(); ctx.ellipse(x - 4, y - 2, 3, 5, 0.4, 0, 7); ctx.fill();
-  ctx.fillStyle = INK; ctx.fillRect(x + 1, y + 2, 2.5, 2.5); ctx.fillRect(x + 6, y + 2, 2.5, 2.5);
+  if (big) { ctx.fillStyle = 'rgba(255,210,63,.35)'; ctx.beginPath(); ctx.arc(x, y, 30 + Math.sin(t * 7) * 2, 0, 7); ctx.fill(); }
+  ctx.fillStyle = big ? '#ffd23f' : JELLY_COL[it.c]; ctx.strokeStyle = INK; ctx.lineWidth = 2.5 + (big ? 0.8 : 0); ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.arc(x - 6 * k, y - 8 * k, 4.5 * k, 0, 7); ctx.arc(x + 6 * k, y - 8 * k, 4.5 * k, 0, 7); ctx.fill(); ctx.stroke();
+  roundRect(x - r, y - r + 2 * k, r * 2, r * 2 - 2 * k, 8 * k); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.65)'; ctx.beginPath(); ctx.ellipse(x - 4 * k, y - 2 * k, 3 * k, 5 * k, 0.4, 0, 7); ctx.fill();
+  ctx.fillStyle = INK; ctx.fillRect(x + 1 * k, y + 2 * k, 2.5 * k, 2.5 * k); ctx.fillRect(x + 6 * k, y + 2 * k, 2.5 * k, 2.5 * k);
+  if (big) { ctx.fillStyle = '#fff'; ctx.font = "bold 11px 'Jua', sans-serif"; ctx.textAlign = 'center'; ctx.fillText('★', x, y - r - 6); }
 }
 function drawPickup(it, t) {
   const bob = Math.sin(t * 4 + it.x * 0.03) * 3, x = it.x, y = it.y + bob;
@@ -751,8 +989,10 @@ function drawScene(w, dt) {
   drawBackground(w, bi);
   drawGround(w, bi);
   if (w) {
+    for (const o of w.obs) { if (o.t === 'platform') drawPlatform(o); else if (o.t === 'spring') drawSpring(o); }
     for (const o of w.obs) {
       if (o.t === 'spike') drawSpike(o); else if (o.t === 'thorn') drawThorn(o); else if (o.t === 'hang') drawHang(o);
+      else if (o.t === 'wall') drawWall(o); else if (o.t === 'ball') drawBall(o); else if (o.t === 'bat') drawBat(o, w);
     }
     for (const it of w.items) { if (it.t === 'jelly') drawJelly(it, uiT); else drawPickup(it, uiT); }
     // 부스터 속도선
