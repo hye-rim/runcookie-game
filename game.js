@@ -432,7 +432,7 @@ function fit() {
     cssW = Math.max(240, Math.floor(W * scale)); cssH = Math.floor(H * scale);
   }
   if (world) world.viewW = VW;
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
   canvas.style.width = cssW + 'px';
   canvas.style.height = cssH + 'px';
   canvas.width = Math.round(cssW * dpr);
