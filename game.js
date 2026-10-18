@@ -29,6 +29,10 @@ const SPRING_V = 1000;              // 스프링을 밟으면 튀어 오르는 �
 // 움직이는 장애물
 const BAT_VX = 70;                  // 박쥐는 세상보다 이만큼 더 빨리 다가온다
 const BAT_BASE = 68, BAT_AMP = 32, BAT_OM = 4.2;    // 박쥐 높이(발 기준)가 출렁이는 범위: 36~100. 슬라이드하면 언제나 지나갈 수 있다
+const ROCK_DROP = 320;              // 바위가 떨어지기 시작하는 높이
+const LASER_CYCLE = 2.0, LASER_ON = 1.15;           // 빔이 켜졌다 꺼지는 한 바퀴(초)와 켜져 있는 시간. 켜지기 직전 0.35초는 깜빡인다
+const LASER_LO = 28, LASER_HI = 44;                 // 빔의 높이(바닥 기준): 서 있으면 맞고, 슬라이드(머리 20)나 점프(발 44 이상)는 지나간다
+const HOP_VX = 60, HOP_H = 68, HOP_OM = 4.6;        // 슬라임은 세상보다 이만큼 더 빨리 다가오며, 최대 이만큼 튀어 오른다
 const BALL_VX = 150;                // 굴러오는 사탕공은 더 빨리 굴러온다
 
 // ---------- Random ----------
@@ -84,6 +88,10 @@ const bat = (dx, ph) => ({ t: 'bat', dx, w: 46, h: 26, vx: BAT_VX, ph });   // �
 const ball = (dx) => ({ t: 'ball', dx, w: 34, h: 34, vx: BALL_VX });       // 굴러오는 사탕공
 const platform = (dx, w = 220, h = 78) => ({ t: 'platform', dx, w, h });    // 올라탈 수 있는 발판 (아래로 지나가도 된다)
 const spring = (dx) => ({ t: 'spring', dx, w: 40, h: 16 });                 // 밟으면 높이 튀어 오름
+const pop = (dx) => ({ t: 'pop', dx, w: 110, h: 42, pop: 0 });              // 땅이 갈라져 있다가 가까워지면 솟는 가시 (뛰어서 넘는다)
+const rock = (dx) => ({ t: 'rock', dx, w: 44, h: 44, drop: ROCK_DROP, fv: 0, landed: false });   // 가까워지면 위에서 떨어지는 바위 (떨어진 뒤에는 뛰어서 넘는다)
+const laser = (dx, ph) => ({ t: 'laser', dx, w: 150, h: 44, ph });         // 깜빡이는 가슴 높이 빔: 켜져 있을 땐 슬라이드나 점프
+const hopper = (dx, ph) => ({ t: 'hopper', dx, w: 34, h: 32, vx: HOP_VX, ph });   // 통통 튀며 다가오는 슬라임: 뛰어 넘거나 높이 떴을 때 슬라이드
 
 // 장애물 사이 간격은 속도가 아니라 '시간'으로 잡는다 (빨라져도 반응할 시간이 비슷하게 남도록)
 const gapFor = (spd) => spd * 0.85 + 60;           // 따로 나오는 패턴 사이
@@ -108,6 +116,11 @@ const PRIM = {
     const xs = x0 + c, xb = CX + (xs - CX) * (s + BALL_VX) / s;      // 공이 같은 순간에 쿠키에 닿도록 공의 출발 위치를 앞으로 미룬다
     return { obs: [ball(xb - x0 - 17)], items: arcAt(c, s), end: xb - x0 + 40 };
   } },
+  pop: { half: (s) => halfSpan(s), build: (c, s) => ({ obs: [pop(c - 55)], items: arcAt(c, s) }) },
+  rock: { half: (s) => halfSpan(s), build: (c, s) => ({ obs: [rock(c - 22)], items: arcAt(c, s) }) },
+  laser: { half: () => 110, build: (c, s, w) => ({ obs: [laser(c - 75, rand(w) * LASER_CYCLE)], items: line(c - 95, 6, 20, 38) }) },
+  hopper: { half: (s) => halfSpan(s), build: (c, s, w) => ({ obs: [hopper(c - 17, rand(w) * 6.28)], items: arcAt(c, s) }) },
+  bats: { half: () => 160, build: (c, s, w) => { const p = rand(w) * 6.28; return { obs: [bat(c - 120, p), bat(c - 20, p + 2.1), bat(c + 80, p + 4.2)], items: line(c - 150, 8, 22, 38) }; } },
   platform: { half: () => 140, build: (c) => ({ obs: [platform(c - 110)], items: [...line(c - 85, 6, 78 + 26, 34), ...line(c - 85, 6, 28, 34)] }) },
   platPit: { half: () => 170, build: (c) => ({ obs: [pit(c - 115, 230), platform(c - 125, 250)], items: line(c - 100, 7, 78 + 26, 34) }) },
   spring: { half: (s) => halfSpan(s, PATH_SPRING) + 20, build: (c, s) => {
@@ -121,13 +134,15 @@ const KIND_INFO = {
   line: { min: 0, w: [3, 1], rest: true }, arc: { min: 0, w: [2, 1], rest: true }, sky: { min: 60, w: [0.6, 1.4], rest: true },
   spike1: { min: 0, w: [5, 2] }, spike2: { min: 30, w: [2, 2] }, thorn: { min: 40, w: [1.4, 2.4] }, spike3: { min: 120, w: [0.5, 2.4] },
   hang: { min: 100, w: [1.4, 2.6] }, pit: { min: 180, w: [1.2, 2.8] }, bat: { min: 250, w: [1.4, 2.8] }, ball: { min: 320, w: [1.4, 2.8] },
-  wall: { min: 450, w: [1.2, 2.4] }, platform: { min: 500, w: [1.2, 2] }, platPit: { min: 620, w: [1, 2] }, spring: { min: 560, w: [1, 1.8] },
+  wall: { min: 450, w: [1.2, 2.4] },
+  pop: { min: 200, w: [1.2, 2.2] }, rock: { min: 380, w: [1.2, 2.4] }, laser: { min: 430, w: [1.2, 2.4] }, hopper: { min: 520, w: [1.2, 2.4] }, bats: { min: 700, w: [0.8, 2.4] },
+  platform: { min: 500, w: [1.2, 2] }, platPit: { min: 620, w: [1, 2] }, spring: { min: 560, w: [1, 1.8] },
 };
 // 구역(400m마다)마다 자주 나오는 장애물이 달라진다
 const FAVOR = [
-  ['spike1', 'spike2', 'spike3', 'pit', 'hang', 'arc'],          // 사탕 나라
-  ['thorn', 'ball', 'bat', 'wall', 'line'],                      // 초코 숲
-  ['platform', 'platPit', 'spring', 'sky', 'bat', 'pit'],        // 별밤 정원
+  ['spike1', 'spike2', 'spike3', 'pit', 'hang', 'arc', 'pop'],          // 사탕 나라
+  ['thorn', 'ball', 'bat', 'wall', 'line', 'rock', 'hopper'],                      // 초코 숲
+  ['platform', 'platPit', 'spring', 'sky', 'bat', 'pit', 'laser', 'bats'],        // 별밤 정원
 ];
 const REST_KINDS = Object.keys(KIND_INFO).filter((k) => KIND_INFO[k].rest);
 const HAZARD_KINDS = Object.keys(KIND_INFO).filter((k) => !KIND_INFO[k].rest);
@@ -153,9 +168,9 @@ function composeKinds(w, m, lv) {
   const out = [];
   if (rand(w) < pRest) { const k = pickKind(w, m, lv, REST_KINDS); out.push(k); w.recent.push(k); }
   else {
-    const p2 = Math.max(0, Math.min(0.65, (m - 120) / 400)), p3 = Math.max(0, Math.min(0.4, (m - 400) / 600));
+    const p2 = Math.max(0, Math.min(0.65, (m - 120) / 400)), p3 = Math.max(0, Math.min(0.4, (m - 400) / 600)), p4 = Math.max(0, Math.min(0.5, (m - 900) / 800));
     let n = 1;
-    if (rand(w) < p2) { n = 2; if (rand(w) < p3 / 0.65) n = 3; }
+    if (rand(w) < p2) { n = 2; if (rand(w) < p3 / 0.65) { n = 3; if (rand(w) < p4) n = 4; } }
     for (let i = 0; i < n; i++) {
       const k = pickKind(w, m, lv, HAZARD_KINDS);
       out.push(k);
@@ -238,6 +253,12 @@ function supportY(w, feetY) {
 // 박쥐의 중심 높이(발 기준)
 const batHeight = (w, o) => BAT_BASE + BAT_AMP * Math.sin(o.ph + w.t * BAT_OM);
 
+// 빔이 켜져 있는가 / 켜지기 직전인가(깜빡임) / 슬라임이 땅에서 떠 있는 높이
+const laserPhase = (w, o) => (w.t + o.ph) % LASER_CYCLE;
+const laserOn = (w, o) => laserPhase(w, o) < LASER_ON;
+const laserWarn = (w, o) => { const p = laserPhase(w, o); return p >= LASER_CYCLE - 0.35; };
+const hopLift = (w, o) => HOP_H * Math.abs(Math.sin(o.ph + w.t * HOP_OM));
+
 function cookieBox(ck) {
   const h = ck.sliding ? SLIDE_H : STAND_H;
   return { l: CX - HALF_W + 2, r: CX + HALF_W - 2, t: ck.y - h + 4, b: ck.y - 3 };
@@ -249,6 +270,10 @@ function obsBoxes(o, w) {
     case 'wall': return [{ l: o.x + 3, r: o.x + o.w - 3, t: GROUND - o.h, b: GROUND }];
     case 'ball': return [{ l: o.x + 5, r: o.x + o.w - 5, t: GROUND - 30, b: GROUND }];
     case 'bat': { const yc = GROUND - batHeight(w, o); return [{ l: o.x + 8, r: o.x + o.w - 8, t: yc - 13, b: yc + 13 }]; }
+    case 'pop': return o.pop > 0.6 ? [{ l: o.x + 8, r: o.x + o.w - 8, t: GROUND - o.h * o.pop, b: GROUND }] : [];
+    case 'rock': return [{ l: o.x + 4, r: o.x + o.w - 4, t: GROUND - o.drop - o.h, b: GROUND - o.drop }];
+    case 'laser': return laserOn(w, o) ? [{ l: o.x, r: o.x + o.w, t: GROUND - LASER_HI, b: GROUND - LASER_LO }] : [];
+    case 'hopper': { const lift = hopLift(w, o); return [{ l: o.x + 5, r: o.x + o.w - 5, t: GROUND - lift - o.h, b: GROUND - lift }]; }
     case 'hang': return [{ l: o.x, r: o.x + o.w, t: -50, b: GROUND - HANG_CLEAR }];
     default: return [];
   }
@@ -279,6 +304,17 @@ function stepWorld(w, dt, inp) {
   for (const o of w.obs) { o.x -= dx; if (o.vx) o.x -= o.vx * dt; }       // 박쥐·사탕공은 세상보다 더 빨리 다가온다
   for (const it of w.items) it.x -= dx;
   w.obs = w.obs.filter((o) => o.x + (o.w || 60) > -80);
+  for (const o of w.obs) {
+    if (o.t === 'pop') {                                   // 가까워질수록 솟는다 (0.5초 전부터 올라와 0.3초 전에 다 솟는다)
+      const gap = o.x + o.w / 2 - CX;
+      o.pop = Math.max(0, Math.min(1, (w.speed * 0.5 - gap) / (w.speed * 0.2)));
+    } else if (o.t === 'rock' && !o.landed) {              // 0.8초쯤 앞에서 떨어지기 시작
+      if (o.x - CX < w.speed * 0.8 + 40) {
+        o.fv += GRAV * 1.2 * dt; o.drop -= o.fv * dt;
+        if (o.drop <= 0) { o.drop = 0; o.landed = true; ev(w, 'thud', { x: o.x, w: o.w }); }
+      }
+    }
+  }
   w.spawnIn -= dx;
   if (w.spawnIn <= 0) spawnPattern(w);
 
@@ -376,7 +412,7 @@ function stepWorld(w, dt, inp) {
 if (typeof document === 'undefined') {
   module.exports = {
     W, H, GROUND, CX, PX_PER_M, JUMP_V, JUMP2_V, GRAV, SPEED0, SPEED_MAX, HP_MAX, PRIM, KIND_INFO, FAVOR, PATH1, PATH2, PATH_SPRING, halfSpan,
-    composeKinds, buildChain, pickKind, supportY, batHeight, SPRING_V, BALL_VX, BAT_VX,
+    composeKinds, buildChain, pickKind, supportY, batHeight, laserOn, hopLift, SPRING_V, BALL_VX, BAT_VX,
     newWorld, stepWorld, meters, scoreOf, spawnPattern, overPit, cookieBox, obsBoxes, gapFor,
   };
 } else {
@@ -558,6 +594,7 @@ function handleEvents(evs) {
     else if (e.type === 'boost') { sfx.boost(); burst(CX, ck.y - 26, '#ffd23f', 18, 200); floatText('부스터!', VW / 2, 150, '#ffd23f'); }
     else if (e.type === 'magnet') { sfx.magnet(); floatText('자석!', VW / 2, 150, '#5ab8ff'); }
     else if (e.type === 'spring') { sfx.spring(); burst(CX, GROUND, '#5ab8ff', 10, 120, 80); floatText('슝~!', CX + 40, ck.y - 60, '#5ab8ff'); }
+    else if (e.type === 'thud') { sfx.smash(); burst(e.x + (e.w || 40) / 2, GROUND - 4, '#c9b8ff', 8, 140); shake = Math.max(shake, 0.1); }
     else if (e.type === 'smash') { sfx.smash(); burst(e.x + (e.w || 40) / 2, GROUND - 30, '#ffb3d9', 14, 200); shake = 0.15; }
     else if (e.type === 'dead') { sfx.dead(); onDead(); }
   }
@@ -982,6 +1019,76 @@ function drawHud(w) {
   if (w.magnetT > 0) badge('🧲자석', '#5ab8ff', w.magnetT, MAGNET_T);
 }
 
+// 솟는 가시: 땅의 금(갈라진 자국)이 먼저 보이고, 가까워지면 가시가 솟는다
+function drawPop(o) {
+  const sk = skOf(o), [c0, c1, hi] = SK.spike[sk];
+  const gx = o.x + 8, gw = o.w - 16;
+  ctx.lineJoin = 'round'; ctx.lineWidth = 3; ctx.strokeStyle = INK;
+  ctx.fillStyle = 'rgba(43,29,82,.45)'; ctx.fillRect(gx, GROUND - 3, gw, 5);              // 갈라진 틈
+  ctx.beginPath(); for (let i = 0; i < 6; i++) { const x = gx + 6 + i * (gw - 12) / 5; ctx.moveTo(x - 4, GROUND - 2); ctx.lineTo(x, GROUND + 5); ctx.lineTo(x + 4, GROUND - 2); } ctx.stroke();
+  if (o.pop <= 0.02) return;
+  const n = 3, sw = gw / n, hh = o.h * o.pop;
+  ctx.save(); ctx.beginPath(); ctx.rect(o.x, GROUND - 90, o.w, 90); ctx.clip();
+  for (let i = 0; i < n; i++) {
+    const x = gx + i * sw;
+    ctx.beginPath(); ctx.moveTo(x, GROUND + 2); ctx.lineTo(x + sw / 2, GROUND - hh); ctx.lineTo(x + sw, GROUND + 2); ctx.closePath();
+    ctx.fillStyle = c1; ctx.fill(); ctx.stroke();
+    ctx.fillStyle = hi; ctx.beginPath(); ctx.moveTo(x + sw * 0.4, GROUND - hh * 0.35); ctx.lineTo(x + sw / 2, GROUND - hh + 5); ctx.lineTo(x + sw * 0.5, GROUND - hh * 0.35); ctx.fill();
+  }
+  ctx.restore();
+}
+// 떨어지는 바위: 바닥에 그림자(커지는 경고)가 깔린다
+function drawRock(o) {
+  const sk = skOf(o), [a, b] = SK.block[sk];
+  const cx = o.x + o.w / 2, y = GROUND - o.drop - o.h;
+  if (!o.landed) {
+    const k = Math.max(0, 1 - o.drop / ROCK_DROP);
+    ctx.fillStyle = `rgba(43,29,82,${0.18 + 0.3 * k})`; ctx.beginPath(); ctx.ellipse(cx, GROUND + 2, 12 + 22 * k, 4 + 3 * k, 0, 0, 7); ctx.fill();
+    if (o.drop > 40) { ctx.fillStyle = '#ff5f7a'; ctx.font = '22px Jua, sans-serif'; ctx.textAlign = 'center'; ctx.fillText('!', cx, GROUND - 14 - (uiT * 40 % 6)); }
+  }
+  ctx.lineJoin = 'round'; ctx.lineWidth = 3; ctx.strokeStyle = INK;
+  ctx.beginPath(); ctx.moveTo(o.x + 4, y + o.h); ctx.lineTo(o.x, y + 14); ctx.lineTo(o.x + 12, y + 2); ctx.lineTo(o.x + o.w - 10, y); ctx.lineTo(o.x + o.w, y + 16); ctx.lineTo(o.x + o.w - 4, y + o.h); ctx.closePath();
+  ctx.fillStyle = a; ctx.fill(); ctx.stroke();
+  ctx.fillStyle = b; ctx.beginPath(); ctx.moveTo(o.x + 12, y + 2); ctx.lineTo(o.x + o.w - 10, y); ctx.lineTo(o.x + o.w - 14, y + 14); ctx.lineTo(o.x + 8, y + 18); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(43,29,82,.5)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx - 2, y + 18); ctx.lineTo(cx + 4, y + 28); ctx.lineTo(cx - 3, y + 36); ctx.stroke();
+  if (sk === 2) { ctx.fillStyle = 'rgba(143,230,255,.22)'; ctx.beginPath(); ctx.arc(cx, y + o.h / 2, 40, 0, 7); ctx.fill(); }
+}
+// 깜빡이는 빔: 양쪽 기둥 사이에 켜졌다 꺼진다. 켜지기 직전엔 가늘게 깜빡인다
+function drawLaser(o, w) {
+  const sk = skOf(o), [a, b] = SK.bar[sk];
+  const on = laserOn(w, o), warn = laserWarn(w, o);
+  const mid = GROUND - (LASER_LO + LASER_HI) / 2;
+  if (on || (warn && Math.floor(uiT * 16) % 2 === 0)) {
+    const th = on ? LASER_HI - LASER_LO : 4;
+    const grd = ctx.createLinearGradient(0, mid - th, 0, mid + th);
+    grd.addColorStop(0, 'rgba(255,60,90,0)'); grd.addColorStop(0.5, on ? '#ff3c5a' : 'rgba(255,60,90,.7)'); grd.addColorStop(1, 'rgba(255,60,90,0)');
+    ctx.fillStyle = grd; ctx.fillRect(o.x + 8, mid - th, o.w - 16, th * 2);
+    if (on) { ctx.fillStyle = '#fff'; ctx.fillRect(o.x + 8, mid - 2, o.w - 16, 4); }
+  }
+  ctx.lineJoin = 'round'; ctx.lineWidth = 3; ctx.strokeStyle = INK;
+  for (const px of [o.x, o.x + o.w - 14]) {
+    ctx.fillStyle = a; ctx.beginPath(); ctx.rect(px, GROUND - 58, 14, 58); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = on ? '#ff3c5a' : b; ctx.beginPath(); ctx.arc(px + 7, mid, 6, 0, 7); ctx.fill(); ctx.stroke();
+  }
+}
+// 통통 슬라임
+function drawHopper(o, w) {
+  const sk = skOf(o);
+  const lift = hopLift(w, o);
+  const cx = o.x + o.w / 2, base = GROUND - lift;
+  const squash = lift < 8 ? 0.8 + lift / 40 : 1.08;
+  ctx.fillStyle = 'rgba(43,29,82,.25)'; ctx.beginPath(); ctx.ellipse(cx, GROUND + 2, 16 - lift * 0.08, 4, 0, 0, 7); ctx.fill();
+  ctx.save(); ctx.translate(cx, base); ctx.scale(1 / squash, squash);
+  ctx.lineJoin = 'round'; ctx.lineWidth = 3; ctx.strokeStyle = INK;
+  ctx.beginPath(); ctx.moveTo(-17, 0); ctx.quadraticCurveTo(-19, -34, 0, -34); ctx.quadraticCurveTo(19, -34, 17, 0); ctx.closePath();
+  ctx.fillStyle = sk === 1 ? '#c98a5c' : sk === 2 ? '#7fd8ff' : '#7be0a0'; ctx.fill(); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.beginPath(); ctx.ellipse(-7, -24, 3, 5, 0.5, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(-6, -15, 4.5, 0, 7); ctx.arc(6, -15, 4.5, 0, 7); ctx.fill();
+  ctx.fillStyle = INK; ctx.beginPath(); ctx.arc(-5, -15, 2, 0, 7); ctx.arc(7, -15, 2, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(1, -7, 4, 0.1, Math.PI - 0.1); ctx.lineWidth = 2; ctx.stroke();
+  ctx.restore();
+}
+
 function drawScene(w, dt) {
   const bi = biomeAt(w ? meters(w) : 0);
   ctx.save();
@@ -992,6 +1099,7 @@ function drawScene(w, dt) {
     for (const o of w.obs) { if (o.t === 'platform') drawPlatform(o); else if (o.t === 'spring') drawSpring(o); }
     for (const o of w.obs) {
       if (o.t === 'spike') drawSpike(o); else if (o.t === 'thorn') drawThorn(o); else if (o.t === 'hang') drawHang(o);
+      else if (o.t === 'pop') drawPop(o); else if (o.t === 'rock') drawRock(o); else if (o.t === 'laser') drawLaser(o, w); else if (o.t === 'hopper') drawHopper(o, w);
       else if (o.t === 'wall') drawWall(o); else if (o.t === 'ball') drawBall(o); else if (o.t === 'bat') drawBat(o, w);
     }
     for (const it of w.items) { if (it.t === 'jelly') drawJelly(it, uiT); else drawPickup(it, uiT); }
