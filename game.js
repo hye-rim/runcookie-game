@@ -1,6 +1,7 @@
 'use strict';
 // 오락실 튜토리얼이 '진짜로 일어난 일'을 알아채는 신호 (arcade/public/tutorial.js 가 듣는다. 튜토리얼이 아니면 아무도 안 듣는다)
 const tutorialSignal = (type) => window.dispatchEvent(new CustomEvent('arcade:tutorial', { detail: { type } }));
+let tutorialSliding = false;
 
 // 달려라 쿠키: 화면·입력·소리. 규칙(달리기·점프·장애물·젤리·체력)은 logic.js (LOGIC_RUNCOOKIE) 에 있다.
 const L = LOGIC_RUNCOOKIE;
@@ -740,6 +741,8 @@ function frame(now) {
         inp.jumpHeld = jumpKeys.size > 0 || [...pointers.values()].includes('jump');
         inp.slide = slideKeys.size > 0 || [...pointers.values()].includes('slide');
         stepWorld(world, 1 / 120, inp);
+        if (world.ck.sliding && !tutorialSliding) tutorialSignal('slide');          // 실제로 미끄러지기 시작했다
+        tutorialSliding = world.ck.sliding;
         if (world.events.length) { handleEvents(world.events); world.events = []; }
         if (state !== 'play') break;
       }
