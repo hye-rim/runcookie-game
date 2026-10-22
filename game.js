@@ -1,4 +1,6 @@
 'use strict';
+// 오락실 튜토리얼이 '진짜로 일어난 일'을 알아채는 신호 (arcade/public/tutorial.js 가 듣는다. 튜토리얼이 아니면 아무도 안 듣는다)
+const tutorialSignal = (type) => window.dispatchEvent(new CustomEvent('arcade:tutorial', { detail: { type } }));
 
 // 달려라 쿠키: 화면·입력·소리. 규칙(달리기·점프·장애물·젤리·체력)은 logic.js (LOGIC_RUNCOOKIE) 에 있다.
 const L = LOGIC_RUNCOOKIE;
@@ -168,6 +170,7 @@ function floatText(text, x, y, color = '#fff') { texts.push({ text, x, y, t: 0, 
 function handleEvents(evs) {
   const ck = world.ck;
   for (const e of evs) {
+    tutorialSignal(e.type);
     if (e.type === 'jump') { sfx.jump(); burst(CX, GROUND, '#fff', 5, 60, 20); }
     else if (e.type === 'djump') { sfx.djump(); burst(CX, ck.y, '#fff8c4', 8, 70, 10); }
     else if (e.type === 'land') { sfx.land(); burst(CX, GROUND, '#fff', 3, 50, 10); }
